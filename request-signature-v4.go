@@ -19,7 +19,10 @@ package minio
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt" // including for printing
 	"net/http"
+	"net/http/httputil" // including for printing
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -242,7 +245,12 @@ func preSignV4(req http.Request, accessKeyID, secretAccessKey, location string, 
 
 	// Add signature header to RawQuery.
 	req.URL.RawQuery += "&X-Amz-Signature=" + signature
-
+	dump, err := httputil.DumpRequestOut(&req, true)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	fmt.Printf("%q", dump)
 	return &req
 }
 
@@ -298,6 +306,11 @@ func signV4(req http.Request, accessKeyID, secretAccessKey, location string) *ht
 	// Set authorization header.
 	auth := strings.Join(parts, ", ")
 	req.Header.Set("Authorization", auth)
-
+	dump, err := httputil.DumpRequestOut(&req, true)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	fmt.Printf("%q", dump)
 	return &req
 }
