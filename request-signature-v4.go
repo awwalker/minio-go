@@ -267,6 +267,7 @@ func postPresignSignatureV4(policyBase64 string, t time.Time, secretAccessKey, l
 // signV4 sign the request before Do(), in accordance with
 // http://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-authenticating-requests.html.
 func signV4(req http.Request, accessKeyID, secretAccessKey, location string) *http.Request {
+	fmt.Println("this is signv4")
 	// Signature calculation is not needed for anonymous credentials.
 	if accessKeyID == "" || secretAccessKey == "" {
 		return &req
