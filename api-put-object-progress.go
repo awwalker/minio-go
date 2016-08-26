@@ -16,7 +16,10 @@
 
 package minio
 
-import "io"
+import (
+	"fmt"
+	"io"
+)
 
 // PutObjectWithProgress - With progress.
 func (c Client) PutObjectWithProgress(bucketName, objectName string, reader io.Reader, contentType string, progress io.Reader) (n int64, err error) {
@@ -85,6 +88,7 @@ func (c Client) PutObjectWithProgress(bucketName, objectName string, reader io.R
 	if size < minPartSize && size >= 0 {
 		return c.putObjectSingle(bucketName, objectName, reader, size, contentType, progress)
 	}
+	fmt.Println("doing multipart")
 	// For all sizes greater than 5MiB do multipart.
 	n, err = c.putObjectMultipart(bucketName, objectName, reader, size, contentType, progress)
 	if err != nil {

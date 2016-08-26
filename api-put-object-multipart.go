@@ -55,6 +55,7 @@ func (c Client) putObjectMultipart(bucketName, objectName string, reader io.Read
 	if size > 0 && size > minPartSize {
 		// Verify if reader is *os.File, then use file system functionalities.
 		if isFile(reader) {
+			fmt.Println("is file")
 			return c.putObjectMultipartFromFile(bucketName, objectName, reader.(*os.File), size, contentType, progress)
 		}
 		// Verify if reader is *minio.Object or io.ReaderAt.
@@ -64,9 +65,11 @@ func (c Client) putObjectMultipart(bucketName, objectName string, reader io.Read
 		// and such a functionality is used in the subsequent code
 		// path.
 		if isObject(reader) || isReadAt(reader) {
+			fmt.Println("here")
 			return c.putObjectMultipartFromReadAt(bucketName, objectName, reader.(io.ReaderAt), size, contentType, progress)
 		}
 	}
+	fmt.Println("multipart stream")
 	// For any other data size and reader type we do generic multipart
 	// approach by staging data in temporary files and uploading them.
 	return c.putObjectMultipartStream(bucketName, objectName, reader, size, contentType, progress)
@@ -75,6 +78,7 @@ func (c Client) putObjectMultipart(bucketName, objectName string, reader io.Read
 // putObjectStream uploads files bigger than 5MiB, and also supports
 // special case where size is unknown i.e '-1'.
 func (c Client) putObjectMultipartStream(bucketName, objectName string, reader io.Reader, size int64, contentType string, progress io.Reader) (n int64, err error) {
+	fmt.Println("using new putObject")
 	// Input validation.
 	if err := isValidBucketName(bucketName); err != nil {
 		return 0, err
@@ -137,7 +141,9 @@ func (c Client) putObjectMultipartStream(bucketName, objectName string, reader i
 			// Calculates hash sums while copying partSize bytes into tmpBuffer.
 			prtSize, rErr := hashCopyN(hashAlgos, hashSums, tmpBuffer, reader, partSize)
 			if rErr != nil {
+				fmt.Println(rErr)
 				if rErr != io.EOF {
+					fmt.Println("sending non rErr error on hash")
 					// Send the error through the channel and exit
 					// the goroutine.
 					partResCh <- partUploadRes{
@@ -164,6 +170,7 @@ func (c Client) putObjectMultipartStream(bucketName, objectName string, reader i
 				var objPart objectPart
 				objPart, err = c.uploadPart(bucketName, objectName, uploadID, tmpBuffer, partNum, hashSums["md5"], hashSums["sha256"], prtSize)
 				if err != nil {
+					fmt.Println("sending normal error to channel")
 					partResCh <- partUploadRes{
 						size: 0,
 						err:  err,
@@ -174,6 +181,7 @@ func (c Client) putObjectMultipartStream(bucketName, objectName string, reader i
 				// Save successfully uploaded part metadata.
 				partsInfo[partNum] = objPart
 			} else {
+				fmt.Println("sending no put-part to channel")
 				// This part was not uploaded. Send back no error and just the size
 				// to update the progress bar on the other end.
 				partResCh <- partUploadRes{
@@ -187,6 +195,7 @@ func (c Client) putObjectMultipartStream(bucketName, objectName string, reader i
 			// Done with uploading: Reached EOF and do not
 			// know the expected size so exit.
 			if size < 0 && rErr == io.EOF {
+				fmt.Println("sending rErr to channel")
 				partResCh <- partUploadRes{
 					size: size,
 					err:  rErr,
