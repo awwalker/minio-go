@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
+	"fmt"
 	"hash"
 	"io"
 	"io/ioutil"
@@ -32,6 +33,12 @@ import (
 	"strconv"
 	"strings"
 )
+
+// partUploadRes - the response of a part upload.
+type partUploadRes struct {
+	size int64 // Send back size to update the progess bar.
+	err  error // Send back any error to exit when appropriate.
+}
 
 // Comprehensive put object operation involving multipart resumable uploads.
 //
@@ -108,75 +115,126 @@ func (c Client) putObjectMultipartStream(bucketName, objectName string, reader i
 		return 0, err
 	}
 
-	// Part number always starts with '1'.
-	partNumber := 1
+	// Create a channel for the go-routines to communicate through.
+	partResCh := make(chan partUploadRes, 1)
 
-	// Initialize a temporary buffer.
-	tmpBuffer := new(bytes.Buffer)
+	fmt.Println("there are ", totalPartsCount, " parts")
+	// Loop through parts and upload them in parallel.
+	for partNumber := 1; partNumber <= totalPartsCount; partNumber++ {
+		go func(partNum int) {
+			fmt.Println("starting routine, ", partNum)
+			tmpBuffer := new(bytes.Buffer)
 
-	for partNumber <= totalPartsCount {
-
-		// Choose hash algorithms to be calculated by hashCopyN, avoid sha256
-		// with non-v4 signature request or HTTPS connection
-		hashSums := make(map[string][]byte)
-		hashAlgos := make(map[string]hash.Hash)
-		hashAlgos["md5"] = md5.New()
-		if c.signature.isV4() && !c.secure {
-			hashAlgos["sha256"] = sha256.New()
-		}
-
-		// Calculates hash sums while copying partSize bytes into tmpBuffer.
-		prtSize, rErr := hashCopyN(hashAlgos, hashSums, tmpBuffer, reader, partSize)
-		if rErr != nil {
-			if rErr != io.EOF {
-				return 0, rErr
+			// Choose hash algorithms to be calculated by hashCopyN, avoid sha256
+			// with non-v4 signature request or HTTPS connection
+			hashSums := make(map[string][]byte)
+			hashAlgos := make(map[string]hash.Hash)
+			hashAlgos["md5"] = md5.New()
+			if c.signature.isV4() && !c.secure {
+				hashAlgos["sha256"] = sha256.New()
 			}
-		}
 
-		var reader io.Reader
-		// Update progress reader appropriately to the latest offset
-		// as we read from the source.
-		reader = newHook(tmpBuffer, progress)
-
-		// Verify if part should be uploaded.
-		if shouldUploadPart(objectPart{
-			ETag:       hex.EncodeToString(hashSums["md5"]),
-			PartNumber: partNumber,
-			Size:       prtSize,
-		}, partsInfo) {
-			// Proceed to upload the part.
-			var objPart objectPart
-			objPart, err = c.uploadPart(bucketName, objectName, uploadID, reader, partNumber, hashSums["md5"], hashSums["sha256"], prtSize)
-			if err != nil {
-				// Reset the temporary buffer upon any error.
-				tmpBuffer.Reset()
-				return totalUploadedSize, err
-			}
-			// Save successfully uploaded part metadata.
-			partsInfo[partNumber] = objPart
-		} else {
-			// Update the progress reader for the skipped part.
-			if progress != nil {
-				if _, err = io.CopyN(ioutil.Discard, progress, prtSize); err != nil {
-					return totalUploadedSize, err
+			// Calculates hash sums while copying partSize bytes into tmpBuffer.
+			prtSize, rErr := hashCopyN(hashAlgos, hashSums, tmpBuffer, reader, partSize)
+			if rErr != nil {
+				if rErr != io.EOF {
+					// Send the error through the channel and exit
+					// the goroutine.
+					partResCh <- partUploadRes{
+						size: 0,
+						err:  err,
+					}
+					return
 				}
 			}
+
+			// TODO: figure out what to do about concurrent access to the progress bar.
+			// MAYBE: handle it when each part comes through the response channel.
+			// Update progress reader appropriately to the latest offset
+			// as we read from the source.
+			// reader = newHook(tmpBuffer, progress)
+
+			// Verify if part should be uploaded.
+			if shouldUploadPart(objectPart{
+				ETag:       hex.EncodeToString(hashSums["md5"]),
+				PartNumber: partNum,
+				Size:       prtSize,
+			}, partsInfo) {
+				// Proceed to upload the part.
+				var objPart objectPart
+				objPart, err = c.uploadPart(bucketName, objectName, uploadID, tmpBuffer, partNum, hashSums["md5"], hashSums["sha256"], prtSize)
+				if err != nil {
+					partResCh <- partUploadRes{
+						size: 0,
+						err:  err,
+					}
+					// Exit the goroutine.
+					return
+				}
+				// Save successfully uploaded part metadata.
+				partsInfo[partNum] = objPart
+			} else {
+				// This part was not uploaded. Send back no error and just the size
+				// to update the progress bar on the other end.
+				partResCh <- partUploadRes{
+					size: prtSize,
+					err:  nil,
+				}
+				// Exit the goroutine.
+				return
+			}
+
+			// Done with uploading: Reached EOF and do not
+			// know the expected size so exit.
+			if size < 0 && rErr == io.EOF {
+				partResCh <- partUploadRes{
+					size: size,
+					err:  rErr,
+				}
+				// Leave the goroutine.
+				// Handle this err specially by
+				// exiting the select block below and
+				// continuing on without the rest of the
+				// goroutines.
+				return
+			}
+			fmt.Println("Leaving routine ", partNum)
+			fmt.Println("feeding partResCh success")
+			// Part was successfully uploaded.
+			// Send back the size to update progress bar.
+			partResCh <- partUploadRes{
+				size: prtSize,
+				err:  nil,
+			}
+		}(partNumber)
+	}
+
+	// Keep track of how much of the object has been uploaded.
+	var totalUploadSize int64
+	count := totalPartsCount
+loop:
+	for count > 0 {
+		fmt.Println(count)
+		select {
+		case partRes := <-partResCh:
+			fmt.Println("drew from partResCh")
+			// Need to verify if the error was because we reached
+			// EOF and do not know the size of the file.
+			if partRes.err != nil {
+				if err == io.EOF && partRes.size < 0 {
+					// Here need to only exit the for/select block and continue.
+					break loop
+				}
+				return totalUploadSize, err
+			}
+			// Update the totalUploadSize.
+			totalUploadSize += partRes.size
+			// Update the progress bar.
+			if _, err := io.CopyN(ioutil.Discard, progress, partRes.size); err != nil {
+				return totalUploadSize, err
+			}
+			count--
 		}
-
-		// Reset the temporary buffer.
-		tmpBuffer.Reset()
-
-		// Save successfully uploaded size.
-		totalUploadedSize += prtSize
-
-		// For unknown size, Read EOF we break away.
-		// We do not have to upload till totalPartsCount.
-		if size < 0 && rErr == io.EOF {
-			break
-		}
-
-		// Increment part number.
-		partNumber++
 	}
 
 	// Verify if we uploaded all the data.
@@ -197,7 +255,7 @@ func (c Client) putObjectMultipartStream(bucketName, objectName string, reader i
 	if size > 0 {
 		// Verify if totalPartsCount is not equal to total list of parts.
 		if totalPartsCount != len(complMultipartUpload.Parts) {
-			return totalUploadedSize, ErrInvalidParts(partNumber, len(complMultipartUpload.Parts))
+			return totalUploadedSize, ErrInvalidParts(totalPartsCount, len(complMultipartUpload.Parts))
 		}
 	}
 
