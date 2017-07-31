@@ -38,7 +38,7 @@ func main() {
 		log.Fatalln(err)
 	}
 
-	// s3Client.TraceOn(os.Stderr)
+	// minioClient.TraceOn(os.Stderr)
 
 	// Create a done channel to control 'ListenBucketNotification' go routine.
 	doneCh := make(chan struct{})
